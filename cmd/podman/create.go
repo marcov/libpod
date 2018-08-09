@@ -21,10 +21,12 @@ import (
 	ann "github.com/projectatomic/libpod/pkg/annotations"
 	"github.com/projectatomic/libpod/pkg/apparmor"
 	"github.com/projectatomic/libpod/pkg/inspect"
+	"github.com/projectatomic/libpod/pkg/rootless"
 	cc "github.com/projectatomic/libpod/pkg/spec"
 	"github.com/projectatomic/libpod/pkg/util"
 	libpodVersion "github.com/projectatomic/libpod/version"
 	"github.com/sirupsen/logrus"
+	"github.com/syndtr/gocapability/capability"
 	"github.com/urfave/cli"
 )
 
@@ -196,7 +198,23 @@ func parseSecurityOpt(config *cc.CreateConfig, securityOpts []string) error {
 		}
 	}
 
-	if config.ApparmorProfile == "" && apparmor.IsEnabled() {
+	aaEnabled := apparmor.IsEnabled()
+	aaControllable := true
+
+	if rootless.IsRootless() {
+		myCaps, err := capability.NewPid2(0)
+		if err != nil {
+			return fmt.Errorf("Error getting current process capabilities")
+		}
+
+		aaControllable = myCaps.Get(capability.EFFECTIVE, capability.CAP_MAC_ADMIN)
+	}
+
+	switch config.ApparmorProfile {
+	case "":
+		if !aaEnabled || !aaControllable {
+			break
+		}
 		// Unless specified otherwise, make sure that the default AppArmor
 		// profile is installed.  To avoid redundantly loading the profile
 		// on each invocation, check if it's loaded before installing it.
@@ -231,9 +249,16 @@ func parseSecurityOpt(config *cc.CreateConfig, securityOpts []string) error {
 			logrus.Infof("Sucessfully loaded AppAmor profile '%s'", profile)
 			config.ApparmorProfile = profile
 		}
-	} else if config.ApparmorProfile != "" && config.ApparmorProfile != "unconfined" {
-		if !apparmor.IsEnabled() {
+
+	case "unconfined":
+
+	default:
+		if !aaEnabled {
 			return fmt.Errorf("profile specified but AppArmor is disabled on the host")
+		}
+
+		if !aaControllable {
+			return fmt.Errorf("AppArmor security option requires root permissions or CAP_MAC_ADMIN")
 		}
 
 		isLoaded, err := apparmor.IsLoaded(config.ApparmorProfile)
